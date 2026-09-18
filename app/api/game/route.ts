@@ -1,4 +1,5 @@
 import { getChatGPTUser } from '@/app/chatgpt-auth';
+import { guestPlayer, createGuestSession } from '@/lib/guest-session';
 import { database } from '@/lib/database';
 import { isWord, randomWord, scoreGuess } from '@/lib/word-engine';
 export const dynamic = 'force-dynamic';
@@ -9,8 +10,6 @@ const reply = (body: unknown, status = 200) => Response.json(body, { status, hea
 const now = () => Date.now();
 const code = () => crypto.randomUUID().replaceAll('-', '').slice(0, 10).toUpperCase();
 type RecordRow = Record<string, any>;
-async function player(db: D1Database) { const auth = await getChatGPTUser(); if (!auth)
-    return null; await db.prepare('INSERT OR IGNORE INTO players (id,name,code) VALUES (?,?,?)').bind(auth.userId, auth.fullName?.slice(0, 24) || 'Player ' + crypto.randomUUID().slice(0, 4).toUpperCase(), code()).run(); return db.prepare('SELECT id,name,code FROM players WHERE id=?').bind(auth.userId).first<RecordRow>(); }
 async function roomFor(db: D1Database, room: string, user: string) { const r = await db.prepare('SELECT r.* FROM rooms r JOIN members m ON m.room=r.code WHERE r.code=? AND m.user=?').bind(room, user).first<RecordRow>(); if (!r)
     throw new Fault('Join this room with its invite code first.', 403); return r; }
 async function refreshRoom(db: D1Database, r: RecordRow) { if (r.status === 'playing') {
@@ -23,11 +22,9 @@ function failure(e: unknown) { if (e instanceof Fault)
     return reply({ error: e.message }, e.status); console.error('Wordmates request failed', e); return reply({ error: 'The game could not connect. Please try again in a moment.' }, 503); }
 export async function GET(request: Request) {
     try {
-        const auth = await getChatGPTUser();
-        if (!auth)
-            return reply({ user: null, date: new Date().toISOString().slice(0, 10) });
         const db = database();
-        const u = (await player(db))!;
+        const u = await guestPlayer(db,request);
+        if (!u) return reply({ user: null, date: new Date().toISOString().slice(0,10) });
         const rc = new URL(request.url).searchParams.get('room');
         const friends = await db.prepare("SELECT p.id,p.name,(SELECT COUNT(*) FROM progress g WHERE g.user=p.id AND g.status='won') AS wins FROM friendships f JOIN players p ON p.id=CASE WHEN f.a=? THEN f.b ELSE f.a END WHERE (f.a=? OR f.b=?) AND f.accepted=1 ORDER BY p.name").bind(u.id, u.id, u.id).all();
         const requests = await db.prepare('SELECT p.id,p.name FROM friendships f JOIN players p ON p.id=f.requester WHERE (f.a=? OR f.b=?) AND f.requester<>? AND f.accepted=0').bind(u.id, u.id, u.id).all();
@@ -72,9 +69,10 @@ export async function POST(request: Request) {
         if (!body || typeof body !== 'object')
             throw new Fault('Invalid request.');
         const db = database();
-        const u = await player(db);
+        if (body.action === 'session') return await createGuestSession(db,request,await getChatGPTUser());
+        const u = await guestPlayer(db,request);
         if (!u)
-            throw new Fault('Sign in with ChatGPT to play.', 401);
+            throw new Fault('Your guest session expired. Refresh the page to keep playing.', 401);
         const action = body.action;
         if (action === 'profile') {
             const name = String(body.name || '').trim();
